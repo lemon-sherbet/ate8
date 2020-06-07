@@ -141,8 +141,6 @@ static inline int _matchX(char p, UCHAR val) {
   i("Fx65",  "RLOAD",  for (int i = 0; i <= X; i++) V[i] = Rd(I+i);            )
 
 static inline void Instr(UCHAR n0, UCHAR n1, UCHAR n2, UCHAR n3) {
-  if(n0||n1||n2||n3) debugprintf("? %X%X%X%X\n",n0,n1,n2,n3);  
-
   const UCHAR N = n3;
   const UCHAR NN = (n2 << 4) | N;
   const Uint16 NNN = (n1 << 8) | NN;
@@ -156,7 +154,7 @@ static inline void Instr(UCHAR n0, UCHAR n1, UCHAR n2, UCHAR n3) {
 #define _MATCHX _matchX
 #define MATCH(pat, nam, ...)                                                                          \
   else if ((_MATCHX(pat[0], n0) && _MATCHX(pat[1], n1) && _MATCHX(pat[2], n2) && _MATCHX(pat[3], n3)) \
-    && (debugprintf("INSTR %.2X: %s [%X%.3X]\n", PC-2, nam, n0,NNN), 1)) { __VA_ARGS__; }
+    && ((void)debugprintf("INSTR %.2X: %s [%X%.3X]\n", PC-2, nam, n0,NNN), 1)) { __VA_ARGS__; }
 
   if (0) {}
   LIST_INSTRS(MATCH)
@@ -180,8 +178,6 @@ void RunFrame(void) {
 
     //optimize for first and last nybbles
     const Uint16 n0_n3 = (b0 & 0xF0) | (b1 & 0x0F);
-
-    if (b0 || b1) debugprintf(" > %.2X%.2X, %.4X\n", b0, b1, n0_n3);
 
 #define O(m) case 0x##m: Instr((0x##m) >> 4, b0 & 0xF, b1 >> 4, (0x##m) & 0xF); break;
 #define Q(m) O(m)O(m+1)O(m+2)O(m+3)
@@ -235,14 +231,10 @@ int main(int argc, char** argv) {
   res = SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO);
   assert(res == 0);
 
-  SDL_AudioSpec want, have;
-
-  SDL_memset(&want, 0, sizeof(want)); /* or SDL_zero(want) */
-  want.freq = 22050;
-  want.format = AUDIO_S16SYS;
-  want.channels = 1;
-  want.samples = 4096;
-  want.callback = NULL;
+  SDL_AudioSpec have, want = {
+    .freq = 22050, .format = AUDIO_S16SYS,
+    .channels = 1, .samples = 4096,
+  };
   audiodev = SDL_OpenAudioDevice(NULL, 0, &want, &have, SDL_AUDIO_ALLOW_FREQUENCY_CHANGE | SDL_AUDIO_ALLOW_CHANNELS_CHANGE);
   if (audiodev) SDL_PauseAudioDevice(audiodev, 0);
   
