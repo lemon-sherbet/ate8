@@ -14,8 +14,8 @@ const Uint32 WHITE = 0xFFFFFFFFLU;
 Uint16 PC = 0x200,
        SP = 0xEFF,
        I = 0;
-UCHAR V[16];
-UCHAR M[0x1000] = {
+Uint8 V[16];
+Uint8 M[0x1000] = {
     //font
     0xF0, 0x90, 0x90, 0x90, 0xF0, // 0
     0x20, 0x60, 0x20, 0x20, 0x70, // 1
@@ -46,18 +46,99 @@ SDL_Surface* screen = NULL;
 #define debugprintf(...) 1
 #endif
 
-#define SLEN(s) (!s[0] ? 0 : (!s[1] ? 1 : (!s[2] ? 2 : (!s[3] ? 3 : 4))))
+//mem read
+static inline Uint8 Rd(Uint16 addr) { return M[addr & 0xFFF]; }
+//mem write
+static inline void  Wr(Uint16 addr, Uint8 val) { M[addr & 0xFFF] = val; }
+
+static void DrawSpr(Uint8 X, Uint8 Y, UCHAR n) {
+  V[0xF] = 0;
+  //go row by row
+  for (short i = 0; i < n; i++) {
+    UCHAR row = Rd(I+i);
+    int x = X;
+    int y = Y+i;
+    for (short bit = 0x80; bit != 0; bit >>= 1, x += 1) {
+      short pix = row & bit;
+      if (pix && x >= 0 && x < W && y >= 0 && y < H) {
+        Uint32* p = (Uint32*)((char*)screen->pixels + (x*screen->format->BytesPerPixel+y*screen->pitch));
+        if (*p == BLACK) *p = WHITE;
+        else if (*p == WHITE) *p = BLACK, V[0xF] = 1;
+      }
+    }
+  }
+}
+
+static void WaitKey(Uint8* dst) {
+  extern int keymap[16];
+  SDL_Event ev;
+  int key;
+  for (;;) {
+    if (SDL_WaitEvent(&ev)) {
+      if (ev.type == SDL_KEYDOWN || ev.type == SDL_KEYUP) {
+        for (int i = 0; i < sizeof keymap / sizeof *keymap; i++) {
+          if (keymap[i] == ev.key.keysym.scancode) {
+            key = i;
+            goto pressed;
+          }
+        }
+      } else if (ev.type == SDL_QUIT) exit(0);
+    }
+  }
+  pressed:
+  *dst = key;
+}
+
+static void PutBCD(Uint8 x) {
+  Wr(I,   (x/100) % 10);
+  Wr(I+1,  (x/10) % 10);
+  Wr(I+2,       x % 10);
+}
 
 static inline int _matchX(char p, UCHAR val) {
-  if (p == '_') return 1;
-  
   UCHAR b;
   if (p >= '0' && p <= '9') b = p - '0';
   else if (p >= 'A' && p <= 'F') b = 0xA + p - 'A';
-  else return 0;
+  else return 1;
 
   return b == val;
 }
+
+#define LIST_INSTRS(i)                                                          \
+  i("00E0",    "CLR",  SDL_FillRect(screen, NULL, BLACK)                       )\
+  i("00EE",    "RET",  SP += 2; PC = (Rd(SP) << 8) | Rd(SP+1)                  )\
+  i("1nnn",    "JMP",  PC = NNN                                                )\
+  i("2nnn",   "CALL",  Wr(SP, PC >> 8), Wr(SP+1, PC & 0xFF), SP -= 2, PC = NNN )\
+  i("3xnn" , "IFEQI",  if (Vx == NN) PC += 2;                                  )\
+  i("4xnn", "IFNEQI",  if (Vx != NN) PC += 2;                                  )\
+  i("5xy0",   "IFEQ",  if (Vx == Vy) PC += 2;                                  )\
+  i("6xnn",   "MOVI",  Vx  = NN                                                )\
+  i("7xnn",   "ADDI",  Vx += NN                                                )\
+  i("8xy0",    "MOV",  Vx  = Vy                                                )\
+  i("8xy1",     "OR",  Vx |= Vy                                                )\
+  i("8xy2",    "AND",  Vx &= Vy                                                )\
+  i("8xy3",    "XOR",  Vx ^= Vy                                                )\
+  i("8xy4",    "ADD",  VF = Vx+Vy > 0xFF, Vx += Vy                             )\
+  i("8xy5",    "SUB",  VF = Vx >= Vy, Vx -= Vy                                 )\
+  i("8xy6",    "SHR",  VF = Vx & 1, Vx >>= 1                                   )\
+  i("8xy7",   "NSUB",  VF = Vy >= Vx, Vx = Vy - Vx                             )\
+  i("8xyE",    "SHL",  VF = (Vx & 0x80) != 0, Vx <<= 1                         )\
+  i("9xy0",  "IFNEQ",  if (Vx != Vy) PC += 2;                                  )\
+  i("Annn",   "IREF",  I = NNN                                                 )\
+  i("Bnnn",   "JMPO",  PC = V[0] + NNN                                         )\
+  i("Cxnn",    "RND",  Vx = rand() & NN                                        )\
+  i("Dxyn",   "DRAW",  DrawSpr(Vx, Vy, N)                                      )\
+  i("Ex9E",   "KEYP",  if (Vx < 0xF && keys[Vx]) PC += 2;                      )\
+  i("ExA1",  "NKEYP",  if (!(Vx < 0xF && keys[Vx])) PC += 2;                   )\
+  i("Fx07",   "STDT",  Vx = delay                                              )\
+  i("Fx0A",   "KEYW",  WaitKey(&Vx)                                            )\
+  i("Fx15",   "LDDT",  delay = Vx                                              )\
+  i("Fx18",   "LDST",  sound = Vx                                              )\
+  i("Fx1E",   "IADD",  I += Vx, VF = I > 0xFFF, I &= 0xFFF                     )\
+  i("Fx29",   "ISPR",  I = (Vx * 5) & 0xFFF                                    )\
+  i("Fx33",    "BCD",  PutBCD(Vx)                                              )\
+  i("Fx55",  "RDUMP",  for (int i = 0; i <= X; i++) Wr(I+i, V[i]);             )\
+  i("Fx65",  "RLOAD",  for (int i = 0; i <= X; i++) V[i] = Rd(I+i);            )
 
 static inline void Instr(UCHAR n0, UCHAR n1, UCHAR n2, UCHAR n3) {
   if(n0||n1||n2||n3) debugprintf("? %X%X%X%X\n",n0,n1,n2,n3);  
@@ -68,157 +149,18 @@ static inline void Instr(UCHAR n0, UCHAR n1, UCHAR n2, UCHAR n3) {
   const UCHAR X = n1;
   const UCHAR Y = n2;
 
-  int matched = 0;
-
 #define VF V[0xF]
 #define Vx V[X]
 #define Vy V[Y]
 //#define _MATCHX(p,x) ((p) != '_' ? (((p) >= 'A' ? 0xA+(p)-'A' : (p)-'0') == (x)) : 1)
 #define _MATCHX _matchX
-#define MATCH(pat, nam)                                                                          \
-  if ((_MATCHX(pat[0], n0) && _MATCHX(pat[1], n1) && _MATCHX(pat[2], n2) && _MATCHX(pat[3], n3)) \
-    && (debugprintf("INSTR %.2X: %s [%X%.3X]\n", PC-2, nam, n0,NNN), matched=1))
+#define MATCH(pat, nam, ...)                                                                          \
+  else if ((_MATCHX(pat[0], n0) && _MATCHX(pat[1], n1) && _MATCHX(pat[2], n2) && _MATCHX(pat[3], n3)) \
+    && (debugprintf("INSTR %.2X: %s [%X%.3X]\n", PC-2, nam, n0,NNN), 1)) { __VA_ARGS__; }
 
-  MATCH("00E0", "CLR") {
-    SDL_FillRect(screen, NULL, BLACK);
-  }
-  MATCH("00EE", "RET") {
-    SP += 2;
-    PC = (M[SP&0xFFF] << 8) | M[(SP+1)&0xFFF];
-  }
-  MATCH("1___", "JMP") {
-    PC = NNN;
-  }
-  MATCH("2___", "CALL") {
-    M[SP] = PC >> 8;
-    M[SP+1] = PC & 0xFF;
-    SP -= 2;
-    PC = NNN;
-  }
-  MATCH("3___", "IFEQI") {
-    if (Vx == NN) PC += 2;
-  }
-  MATCH("4___", "IFNEQI") {
-    if (Vx != NN) PC += 2;
-  }
-  MATCH("5__0", "IFEQ") {
-    if (Vx == Vy) PC += 2;
-  }
-  MATCH("6___", "MOVI") Vx = NN;
-  MATCH("7___", "ADDI") Vx += NN;
-  MATCH("8__0",  "MOV") Vx = Vy;
-  MATCH("8__1",   "OR") Vx |= Vy;
-  MATCH("8__2",  "AND") Vx &= Vy;
-  MATCH("8__3",  "XOR") Vx ^= Vy;
-  MATCH("8__4", "ADD") {
-    VF = Vx+Vy > 0xFF;
-    Vx += Vy;
-  }
-  MATCH("8__5", "SUB") {
-    VF = Vx >= Vy;
-    Vx -= Vy;
-  }
-  MATCH("8__6", "SHR") {
-    VF = Vx & 1;
-    Vx >>= 1;
-  }
-  MATCH("8__7", "NSUB") {
-    VF = Vy >= Vx;
-    Vx = Vy - Vx;
-  }
-  MATCH("8__E", "SHL") {
-    VF = (Vx & 0x80) != 0;
-    Vx <<= 1;
-  }
-  MATCH("9__0", "IFNEQ") {
-    if (Vx != Vy) PC += 2;
-  }
-  MATCH("A___", "IREF") {
-    I = NNN;
-  }
-  MATCH("B___", "JMPO") {
-    PC = V[0] + NNN;
-  }
-  MATCH("C___", "RND") {
-    Vx = rand() & NN;
-  }
-  MATCH("D___", "DRAW") {
-    VF = 0;
-    //go row by row
-    for (short i = 0; i < N; i++) {
-      UCHAR row = M[(I+i) & 0xFFF];
-      int x = Vx;
-      int y = Vy+i;
-      for (short bit = 0x80; bit != 0; bit >>= 1, x += 1) {
-        short pix = row & bit;
-        if (pix && x >= 0 && x < W && y >= 0 && y < H) {
-          Uint32* p = (Uint32*)((char*)screen->pixels + (x*screen->format->BytesPerPixel+y*screen->pitch));
-          if (*p == BLACK) *p = WHITE;
-          else if (*p == WHITE) *p = BLACK, VF = 1;
-        }
-      }
-    }
-  }
-  MATCH("E_9E", "KEYP") {
-    if (Vx < 0xF && keys[Vx]) PC += 2;
-  }
-  MATCH("E_A1", "NKEYP") {
-    if (!(Vx < 0xF && keys[Vx])) PC += 2;
-  }
-  MATCH("F_07", "STDT") {
-    Vx = delay;
-  }
-  MATCH("F_0A", "KEYW") {
-    extern int keymap[16];
-    SDL_Event ev;
-    int key;
-    for (;;) {
-      if (SDL_PollEvent(&ev)) {
-        if (ev.type == SDL_KEYDOWN || ev.type == SDL_KEYUP) {
-          for (int i = 0; i < sizeof keymap / sizeof *keymap; i++) {
-            if (keymap[i] == ev.key.keysym.scancode) {
-              key = i;
-              goto pressed;
-            }
-          }
-        }
-      }
-      SDL_Delay(1);
-    }
-    pressed:
-    Vx = key;
-  }
-  MATCH("F_15", "LDDT") {
-    delay = Vx;
-  }
-  MATCH("F_18", "LDST") {
-    sound = Vx;
-  }
-  MATCH("F_1E", "IADD") {
-    I += Vx;
-    VF = I > 0xFFF;
-    I &= 0xFFF;
-  }
-  MATCH("F_29", "ISPR") {
-    I = (Vx * 5) & 0xFFF;
-  }
-  MATCH("F_33", "BCD") {
-    M[I] = (Vx/100) % 10;
-    M[(I+1)&0xFF] = (Vx/10) % 10;
-    M[(I+2)&0xFF] = Vx % 10;
-  }
-  MATCH("F_55", "RDUMP") {
-    for (int i = 0; i <= X; i++) {
-      M[(I+i)&0xFF] = V[i];
-    }
-  }
-  MATCH("F_65", "RLOAD") {
-    for (int i = 0; i <= X; i++) {
-      V[i] = M[(I+i)&0xFF];
-    }
-  }
-
-  if (!matched) {
+  if (0) {}
+  LIST_INSTRS(MATCH)
+  else {
     fprintf(stderr, "UNKNOWN OPCODE %X%.3X\n",n0,NNN);
   }
 
@@ -233,8 +175,8 @@ void RunFrame(void) {
   for (int cycles = 0; cycles < CYCLES_PER_FRAME; cycles++) {
     int thispc = PC;
     PC += 2;
-    UCHAR b0 = M[thispc & 0xFFF],
-          b1 = M[(thispc+1) & 0xFFF];
+    UCHAR b0 = Rd(thispc),
+          b1 = Rd(thispc+1);
 
     //optimize for first and last nybbles
     const Uint16 n0_n3 = (b0 & 0xF0) | (b1 & 0x0F);
@@ -308,7 +250,7 @@ int main(int argc, char** argv) {
   SDL_Renderer* ren;
   SDL_Texture* tex;
   SDL_SetHint(SDL_HINT_RENDER_VSYNC, "1");
-  SDL_CreateWindowAndRenderer(600,400, SDL_WINDOW_RESIZABLE, &win, &ren);
+  SDL_CreateWindowAndRenderer(W*10,H*10, SDL_WINDOW_RESIZABLE, &win, &ren);
   assert(win && ren);
   SDL_SetWindowTitle(win, "ate8");
   SDL_RenderSetLogicalSize(ren, W, H);
@@ -334,13 +276,9 @@ int main(int argc, char** argv) {
     }
 
     RunFrame();
-    /*for (int i = 0; i < sizeof keys / sizeof *keys; i++) {
-    printf("%i",keys[i]);
-    }
-    putchar('\n');*/
-
 
     SDL_UpdateTexture(tex, NULL, screen->pixels, screen->pitch);
+    SDL_RenderClear(ren);
     SDL_RenderCopy(ren, tex, NULL, NULL);
     SDL_RenderPresent(ren);
   }
